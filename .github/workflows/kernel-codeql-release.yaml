@@ -1,8 +1,8 @@
 name: "Kernel CodeQL Release Creator"
 
 on:
-  # schedule:
-  #   - cron: '15 */2 * * *'
+  schedule:
+    - cron: '15 */7 * * *'
   workflow_dispatch:
     inputs:
       tag:
@@ -40,6 +40,7 @@ jobs:
           repository: ${{ env.SOURCE_REPO }}
           fetch-depth: 0
           fetch-tags: true
+          filter: blob:none
 
       - name: Find new tags
         id: find_new_tags
@@ -171,7 +172,7 @@ jobs:
       - name: Compress DB
         run: |
           set -eux
-          zip -r codeql_db_${{ matrix.tag }}.zip /tmp/codeql_db_${{ matrix.tag }}
+          zip -s 1g -r codeql_db_${{ matrix.tag }}.zip /tmp/codeql_db_${{ matrix.tag }}
 
       - name: Authenticate gh CLI with PAT
         env:
@@ -188,14 +189,13 @@ jobs:
         env:
           TARGET_REPO: ${{ env.TARGET_REPO }}
           TAG: ${{ matrix.tag }}
-          ZIP: codeql_db_${{ matrix.tag }}.zip
+          ZIP: codeql_db_${{ matrix.tag }}
         run: |
           set -eux
+
           # Check if release for tag already exists
           if gh release view "$TAG" --repo "$TARGET_REPO" >/dev/null 2>&1; then
-            echo "Release for tag $TAG exists in $TARGET_REPO — uploading asset (will overwrite if exists)"
-            gh release upload "$TAG" --repo "$TARGET_REPO" --clobber "$ZIP"
+            gh release upload "$TAG" --repo "$TARGET_REPO" --clobber "$ZIP".*
           else
-            echo "Creating new release for tag $TAG in $TARGET_REPO and attaching asset"
-            gh release create "$TAG" --repo "$TARGET_REPO" "$ZIP" --title "CodeQL DB for $TAG" --notes "Attached is the CodeQL database generated for tag $TAG."
+            gh release create "$TAG" --repo "$TARGET_REPO" "$ZIP".* --title "CodeQL DB for $TAG" --notes "Stored as a multipart zip file."
           fi
