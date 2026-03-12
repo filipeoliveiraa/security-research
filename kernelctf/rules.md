@@ -177,7 +177,9 @@ In this stage:
 
   6. Wait for the patch to land in a release candidate on the mainline tree (and be tagged in Git) or be committed to a stable tree, whichever happens first.
 
-  7. Modify the form within 7 days by following the previously saved link and fill out the extra details as described below in the 1-day section.
+     * Make sure that the patch correctly fixes the vulnerability you reported. If it does not, report the issue to the kernel and wait for the correct patch commit, otherwise your submission will be ineligible.
+
+  8. Modify the form within 7 days by following the previously saved link and fill out the extra details as described below in the 1-day section.
 
      * If the 7-day deadline is missed, then the first stage 0-day protection expires and other 1-day submissions can take priority over this submission (which makes this submission a duplicate and thus ineligible for reward).
 
