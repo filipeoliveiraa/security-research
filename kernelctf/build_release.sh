@@ -2,14 +2,14 @@
 set -ex
 
 usage() {
-    echo "Usage: $0 (lts|lts2|cos|mitigation)-<version>[-kasan] [<branch-tag-or-commit>]";
+    echo "Usage: $0 (lts|lts2|cos|mitigation|hardened)-<version>[-kasan] [<branch-tag-or-commit>]";
     exit 1;
 }
 
 RELEASE_NAME="$1"
-BRANCH="$2"
+BRANCH="${2:-}"
 
-if [[ ! "$RELEASE_NAME" =~ ^(lts|lts2|cos|mitigation)-(.*) ]]; then usage; fi
+if [[ ! "$RELEASE_NAME" =~ ^(lts|lts2|cos|mitigation|hardened)-(.*) ]]; then usage; fi
 TARGET="${BASH_REMATCH[1]}"
 VERSION="${BASH_REMATCH[2]}"
 
@@ -18,6 +18,10 @@ if [[ "$VERSION" =~ (.*)-kasan$ ]]; then
     IS_KASAN=1
     VERSION="${BASH_REMATCH[1]}"
 fi
+
+CONFIG_FN=""
+CONFIG_FULL_FN=""
+DEFAULT_BRANCH=""
 
 case $TARGET in
   lts | lts2)
@@ -60,6 +64,17 @@ case $TARGET in
             CONFIG_FN="mitigation-v1.config"
             ;;
     esac ;;
+  hardened)
+    REPO="https://github.com/thejh/linux"
+    case $VERSION in
+        v1-7.2-rc5* | v1*)
+            DEFAULT_BRANCH="slub-virtual-v7.2-rc5"
+            CONFIG_FN="hardened-v1.config"
+            ;;
+    esac
+    if [ -z "$CONFIG_FN" ]; then echo "Failed to select config (VERSION=$VERSION)"; exit 1; fi
+    export LLVM=1
+    ;;
   *)
     usage ;;
 esac
@@ -71,12 +86,17 @@ echo "REPO=$REPO"
 echo "BRANCH=$BRANCH"
 echo "CONFIG_FN=$CONFIG_FN"
 
-BASEDIR=`pwd`
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BASEDIR="$SCRIPT_DIR"
 BUILD_DIR="$BASEDIR/builds/$RELEASE_NAME"
 RELEASE_DIR="$BASEDIR/releases/$RELEASE_NAME"
 CONFIGS_DIR="$BASEDIR/kernel_configs"
 
 if [ -d "$RELEASE_DIR" ]; then echo "Release directory already exists. Stopping."; exit 1; fi
+
+if [ "$TARGET" == "hardened" ]; then
+    "$BASEDIR/ensure_llvm.sh"
+fi
 
 echo "GCC version"
 echo "================="
@@ -89,13 +109,13 @@ clang --version || true
 echo "================="
 echo
 
-mkdir -p $BUILD_DIR 2>/dev/null || true
-cd $BUILD_DIR
-if [ ! -d ".git" ]; then git init && git remote add origin $REPO; fi
+mkdir -p "$BUILD_DIR" 2>/dev/null || true
+cd "$BUILD_DIR"
+if [ ! -d ".git" ]; then git init && git remote add origin "$REPO"; fi
 
-if ! git checkout $BRANCH; then
-    git fetch --depth 1 origin $BRANCH:$BRANCH || true # TODO: hack, solve it better
-    git checkout $BRANCH
+if ! git checkout "$BRANCH"; then
+    git fetch --depth 1 origin "$BRANCH:$BRANCH" || git fetch --depth 1 origin "$BRANCH" || git fetch --depth 1 origin "refs/tags/$BRANCH:refs/tags/$BRANCH" || true
+    git checkout "$BRANCH" || git checkout FETCH_HEAD
 fi
 
 make_kconfig_option_configurable() {
@@ -122,6 +142,9 @@ if [ "$TARGET" == "cos" ]; then
     rm lakitu_defconfig || true
     make lakitu_defconfig
     cp .config lakitu_defconfig
+elif [ "$TARGET" == "hardened" ]; then
+    curl -s 'https://cos.googlesource.com/third_party/kernel/+/f84954518b89caf63ac9fc413561a671e9777a02/arch/x86/configs/lakitu_defconfig?format=TEXT' | base64 -d > lakitu_defconfig
+    cp lakitu_defconfig .config
 elif [ "$TARGET" != "lts2" ]; then
     if [[ $VERSION == "6.12"* ]]; then
         curl 'https://cos.googlesource.com/third_party/kernel/+/refs/heads/cos-6.12/arch/x86/configs/lakitu_defconfig?format=text'|base64 -d > lakitu_defconfig
@@ -137,31 +160,32 @@ if [ "$TARGET" != "lts2" ]; then
     sed -i s/=m/=y/g .config
 fi
 
-if [ ! -z "$CONFIG_FN" ]; then
-    cp $CONFIGS_DIR/$CONFIG_FN kernel/configs/
-    make $CONFIG_FN
+if [ -n "$CONFIG_FN" ]; then
+    mkdir -p kernel/configs
+    cp "$CONFIGS_DIR/$CONFIG_FN" kernel/configs/
+    make "$CONFIG_FN"
 fi
 
-if [ $IS_KASAN -eq 1 ]; then
+if [ "$IS_KASAN" -eq 1 ]; then
     ./scripts/config -e KASAN
 fi
 
 make olddefconfig
 
-if [ "$TARGET" != "lts2" ] && [ ! -z "$CONFIG_FN" ]; then
-    if scripts/diffconfig $CONFIGS_DIR/$CONFIG_FN .config|grep "^[^+]"; then
+if [ "$TARGET" != "lts2" ] && [ -n "$CONFIG_FN" ]; then
+    if scripts/diffconfig "$CONFIGS_DIR/$CONFIG_FN" .config | grep "^[^+]"; then
         echo "Config did not apply cleanly."
         exit 1
     fi
 fi
 
-if [ $IS_KASAN -eq 1 ] && ! grep -q "^CONFIG_KASAN=y" .config; then
+if [ "$IS_KASAN" -eq 1 ] && ! grep -q "^CONFIG_KASAN=y" .config; then
     echo "KASAN config did not apply cleanly."
     exit 1
 fi
 
-if [ ! -z "$CONFIG_FULL_FN" ] && [ $IS_KASAN -eq 0 ]; then
-    if scripts/diffconfig $CONFIGS_DIR/$CONFIG_FULL_FN .config|grep "^[^+]"; then
+if [ -n "$CONFIG_FULL_FN" ] && [ "$IS_KASAN" -eq 0 ]; then
+    if scripts/diffconfig "$CONFIGS_DIR/$CONFIG_FULL_FN" .config | grep "^[^+]"; then
         echo "The full config has differences compared to the applied config. Check if the base config changed since custom config was created."
         exit 1
     fi
@@ -235,6 +259,8 @@ build_and_package() {
 
 if [ "$TARGET" == "lts2" ]; then
     build_and_package "$RELEASE_NAME" "$RELEASE_DIR" "$CONFIGS_DIR/lts2-required.config"
+elif [ "$TARGET" == "hardened" ]; then
+    build_and_package "$RELEASE_NAME" "$RELEASE_DIR" "$CONFIGS_DIR/$CONFIG_FN"
 else
     build_and_package "$RELEASE_NAME" "$RELEASE_DIR"
 fi
