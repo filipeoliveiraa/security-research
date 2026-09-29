@@ -56,10 +56,15 @@ class TestMakefileParsing(unittest.TestCase):
         content = """
 obj-$(CONFIG_NETFILTER) += netfilter/
 obj-$(CONFIG_NF_TABLES) += nf_tables_api.o
+custom_vendor-$(CONFIG_VENDOR_X) += vendor_drv.o
 
 obj-$(CONFIG_KVM) += kvm.o
 kvm-y := kvm_main.o coalesced_mmio.o
 kvm-$(CONFIG_KVM_VFIO) += vfio.o
+
+sub-y := deep_leaf.o
+mod-y := sub.o
+obj-$(CONFIG_DEEP) += mod.o
 
 ifdef CONFIG_DEBUG_FS
 obj-y += debugfs_helper.o
@@ -87,11 +92,15 @@ endif
             self.assertEqual(
                 file_cfgs.get("nf_tables_api.c"), {"CONFIG_NF_TABLES"}
             )
+            self.assertEqual(
+                file_cfgs.get("vendor_drv.c"), {"CONFIG_VENDOR_X"}
+            )
             self.assertEqual(file_cfgs.get("kvm_main.c"), {"CONFIG_KVM"})
             self.assertEqual(file_cfgs.get("coalesced_mmio.c"), {"CONFIG_KVM"})
             self.assertEqual(
                 file_cfgs.get("vfio.c"), {"CONFIG_KVM", "CONFIG_KVM_VFIO"}
             )
+            self.assertEqual(file_cfgs.get("deep_leaf.c"), {"CONFIG_DEEP"})
             self.assertEqual(
                 file_cfgs.get("debugfs_helper.c"), {"CONFIG_DEBUG_FS"}
             )
@@ -100,6 +109,9 @@ endif
             )
             self.assertEqual(file_cfgs.get("foo_mod.c"), {"CONFIG_FOO"})
             self.assertEqual(file_cfgs.get("bar_builtin.c"), {"CONFIG_BAR"})
+            self.assertNotIn("kvm.c", file_cfgs)
+            self.assertNotIn("mod.c", file_cfgs)
+            self.assertNotIn("sub.c", file_cfgs)
         finally:
             os.remove(tmp_path)
 
@@ -130,6 +142,80 @@ endif
                 [
                     ("CONFIG_NETFILTER", rel_c, 1, 3, 0),
                     ("CONFIG_NF_TABLES", rel_c, 1, 3, 0),
+                ],
+            )
+
+    def test_collect_makefile_configs_relative_and_nested_subdirs(self):
+        """Verify nested subdirs (a/b/) and relative/included .o paths."""
+        with tempfile.TemporaryDirectory() as repo:
+            drm_dir = os.path.join(repo, "drivers", "gpu", "drm")
+            bridge_dir = os.path.join(drm_dir, "bridge")
+            amd_dir = os.path.join(drm_dir, "amd", "amdgpu")
+            disp_dir = os.path.join(drm_dir, "nouveau", "dispnv50")
+            os.makedirs(bridge_dir, exist_ok=True)
+            os.makedirs(amd_dir, exist_ok=True)
+            os.makedirs(disp_dir, exist_ok=True)
+
+            with open(
+                os.path.join(drm_dir, "Makefile"), "w", encoding="utf-8"
+            ) as fh:
+                fh.write(
+                    "obj-$(CONFIG_DRM_AMDGPU) += amd/amdgpu/\n"
+                    "obj-$(CONFIG_DRM_KMS_HELPER) += drm_kms_helper.o\n"
+                    "drm_kms_helper-$(CONFIG_DRM_PANEL_BRIDGE) +="
+                    " bridge/panel.o\n"
+                )
+
+            with open(
+                os.path.join(amd_dir, "Makefile"), "w", encoding="utf-8"
+            ) as fh:
+                fh.write("obj-y += amdgpu_drv.o\n")
+
+            with open(
+                os.path.join(disp_dir, "Kbuild"), "w", encoding="utf-8"
+            ) as fh:
+                fh.write("nouveau-$(CONFIG_DEBUG_FS) += dispnv50/crc.o\n")
+
+            for path in (
+                os.path.join(bridge_dir, "panel.c"),
+                os.path.join(amd_dir, "amdgpu_drv.c"),
+                os.path.join(disp_dir, "crc.c"),
+            ):
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write("int x = 1;\nint y = 2;\n")
+
+            rows = kconfig_dump.collect_makefile_configs(repo)
+            self.assertEqual(
+                rows,
+                [
+                    (
+                        "CONFIG_DRM_AMDGPU",
+                        "drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c",
+                        1,
+                        2,
+                        0,
+                    ),
+                    (
+                        "CONFIG_DRM_KMS_HELPER",
+                        "drivers/gpu/drm/bridge/panel.c",
+                        1,
+                        2,
+                        0,
+                    ),
+                    (
+                        "CONFIG_DRM_PANEL_BRIDGE",
+                        "drivers/gpu/drm/bridge/panel.c",
+                        1,
+                        2,
+                        0,
+                    ),
+                    (
+                        "CONFIG_DEBUG_FS",
+                        "drivers/gpu/drm/nouveau/dispnv50/crc.c",
+                        1,
+                        2,
+                        0,
+                    ),
                 ],
             )
 
