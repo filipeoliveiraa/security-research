@@ -378,6 +378,113 @@ class TestFindPaths(unittest.TestCase):
             "[Kconfig: CONFIG_FS_INTERNAL, !CONFIG_FAST_PATH]", tree
         )
 
+    def test_async_edges_path_resolution(self):
+        """Verify async_edges bridges asynchronous callbacks to syscalls."""
+        cur = self.conn.cursor()
+        cur.execute("""
+            CREATE TABLE async_edges (
+                caller TEXT NOT NULL,
+                callee TEXT NOT NULL,
+                mechanism TEXT NOT NULL,
+                form TEXT NOT NULL,
+                file TEXT NOT NULL,
+                line INTEGER NOT NULL,
+                context TEXT NOT NULL
+            )
+        """)
+        cur.execute(
+            "INSERT INTO function_locations VALUES (?, ?, ?, ?)",
+            ("async_work_fn", "fs/internal.c", 300, 320),
+        )
+        cur.execute(
+            "INSERT INTO async_edges VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "target_worker",
+                "async_work_fn",
+                "workqueue",
+                "arg",
+                "fs/internal.c",
+                130,
+                "process",
+            ),
+        )
+        self.conn.commit()
+
+        syscalls = find_paths.get_reachable_syscalls(self.conn, "async_work_fn")
+        self.assertIn("__do_sys_foo", syscalls)
+
+        target_info, paths = find_paths.find_paths_to_line(
+            self.db_path, "fs/internal.c", 310, target_syscall="__do_sys_foo"
+        )
+        self.assertEqual(target_info["function"], "async_work_fn")
+        self.assertIn("__do_sys_foo", paths)
+        path = paths["__do_sys_foo"]
+        self.assertEqual(path[-2]["function"], "target_worker")
+        self.assertEqual(path[-2]["call_type"], "async")
+        self.assertEqual(path[-2]["details"], "workqueue/arg (process)")
+
+        # Verify D1 (multi-depth bridging collects syscalls from deeper callers)
+        # and D3 (duplicate call site at same caller/line is deduplicated)
+        cur.executemany(
+            "INSERT INTO function_locations VALUES (?, ?, ?, ?)",
+            [
+                ("__do_sys_bar", "fs/read.c", 400, 420),
+                ("intermediate_helper", "fs/internal.c", 430, 450),
+            ],
+        )
+        cur.execute(
+            "INSERT INTO syscall_node VALUES (?, ?, ?, ?)",
+            (
+                "__do_sys_bar",
+                "__do_sys_bar",
+                "fs/read.c:400",
+                "fs/read.c:400",
+            ),
+        )
+        cur.executemany(
+            "INSERT INTO async_edges VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    "intermediate_helper",
+                    "async_work_fn",
+                    "workqueue",
+                    "init",
+                    "fs/internal.c",
+                    35,
+                    "kthread",
+                ),
+                (
+                    "__do_sys_bar",
+                    "intermediate_helper",
+                    "timer",
+                    "arg",
+                    "fs/read.c",
+                    410,
+                    "softirq",
+                ),
+                # Duplicate site at target_worker:130 should be deduplicated
+                (
+                    "target_worker",
+                    "async_work_fn",
+                    "workqueue",
+                    "assign",
+                    "fs/internal.c",
+                    130,
+                    "kthread",
+                ),
+            ],
+        )
+        self.conn.commit()
+
+        callers = find_paths.get_callers(self.conn, "async_work_fn")
+        tw_callers = [c for c in callers if c[0] == "target_worker"]
+        self.assertEqual(len(tw_callers), 1)
+
+        all_syscalls = find_paths.get_reachable_syscalls(
+            self.conn, "async_work_fn"
+        )
+        self.assertEqual(all_syscalls, ["__do_sys_bar", "__do_sys_foo"])
+
 
 if __name__ == "__main__":
     unittest.main()
