@@ -1,115 +1,27 @@
 #!/usr/bin/env python3
-# pylint: disable=duplicate-code
 """Unit tests for tools/check_privilege.py."""
 
 import json
-import os
-import sqlite3
-import sys
-import tempfile
 import unittest
 from unittest.mock import patch
 
-try:
-    from tools import check_privilege
-except ImportError:
-    parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    if parent_dir not in sys.path:
-        sys.path.insert(0, parent_dir)
-    import check_privilege  # pylint: disable=import-error
+from tools import check_privilege
+from tools.tests.fixtures import (
+    BaseToolsTestCase,
+    create_async_edges_schema,
+    create_entry_node_schema,
+    create_kconfig_schema,
+)
 
 
-class TestCheckPrivilege(
-    unittest.TestCase
-):  # pylint: disable=too-many-public-methods
-    """Test suite for gating-aware privilege reachability analysis."""
+class CheckPrivilegeTestBase(BaseToolsTestCase):
+    """Base fixture with privilege and gate tables for check_privilege tests."""
 
     def setUp(self):
         """Set up temporary SQLite database with privilege and gate tables."""
-        self.tmp_dir = (
-            tempfile.TemporaryDirectory()  # pylint: disable=consider-using-with
-        )
-        self.db_path = os.path.join(self.tmp_dir.name, "test_codeql.db")
-        self.conn = sqlite3.connect(self.db_path)
-        cur = self.conn.cursor()
-
-        # Create CodeQL schema
-        cur.execute("""
-            CREATE TABLE function_locations (
-                function_name TEXT,
-                file_path TEXT,
-                start_line INTEGER,
-                end_line INTEGER
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE syscall_node (
-                syscall TEXT,
-                function TEXT,
-                syscall_location TEXT,
-                function_location TEXT
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE locations (
-                id INTEGER PRIMARY KEY,
-                threadFlow_id INTEGER,
-                message TEXT,
-                uri TEXT,
-                startLine INTEGER,
-                startColumn INTEGER,
-                endLine INTEGER,
-                endColumn INTEGER
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE edges (
-                id INTEGER PRIMARY KEY,
-                source_location_id INTEGER,
-                target_location_id INTEGER,
-                rule_id TEXT
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE ops_targets (
-                definition TEXT,
-                parent TEXT,
-                field TEXT,
-                target TEXT,
-                target_file TEXT,
-                target_start INTEGER,
-                target_end INTEGER,
-                exprcall_file TEXT,
-                exprcall_line INTEGER,
-                exprcall_parent_start INTEGER,
-                exprcall_parent_end INTEGER
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE conditions (
-                type TEXT,
-                definition TEXT,
-                condition TEXT,
-                argument TEXT,
-                call TEXT,
-                call_location TEXT
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE macroinvocation_locations (
-                macroinvocation_name TEXT,
-                file_path TEXT,
-                start_line INTEGER,
-                end_line INTEGER
-            )
-        """)
-
-        # Insert function spans
-        cur.executemany(
-            """
-            INSERT INTO function_locations VALUES (?, ?, ?, ?)
-        """,
-            [
+        super().setUp()
+        self.insert_rows(
+            function_locations=[
                 ("__do_sys_unpriv", "fs/unpriv.c", 10, 30),
                 ("unpriv_worker", "fs/unpriv.c", 40, 60),
                 ("__do_sys_admin", "kernel/admin.c", 10, 30),
@@ -120,14 +32,7 @@ class TestCheckPrivilege(
                 ("dual_path_worker", "fs/dual.c", 10, 50),
                 ("unreachable_internal", "kernel/sched.c", 100, 120),
             ],
-        )
-
-        # Syscall reachability
-        cur.executemany(
-            """
-            INSERT INTO syscall_node VALUES (?, ?, ?, ?)
-        """,
-            [
+            syscall_node=[
                 (
                     "__do_sys_unpriv",
                     "unpriv_worker",
@@ -165,15 +70,7 @@ class TestCheckPrivilege(
                     "fs/dual.c:10",
                 ),
             ],
-        )
-
-        # Locations and Edges
-        cur.executemany(
-            """
-            INSERT INTO locations (id, message, uri, startLine)
-            VALUES (?, ?, ?, ?)
-        """,
-            [
+            locations=[
                 (1, "__do_sys_unpriv", "fs/unpriv.c", 10),
                 (2, "call to unpriv_worker", "fs/unpriv.c", 20),
                 (3, "__do_sys_admin", "kernel/admin.c", 10),
@@ -189,14 +86,7 @@ class TestCheckPrivilege(
                 (13, "call to dual_path_worker", "fs/unpriv.c", 24),
                 (14, "dual_path_worker", "fs/dual.c", 10),
             ],
-        )
-
-        cur.executemany(
-            """
-            INSERT INTO edges (source_location_id, target_location_id, rule_id)
-            VALUES (?, ?, ?)
-        """,
-            [
+            edges=[
                 (1, 2, "callgraph-all"),
                 (3, 4, "callgraph-all"),
                 (5, 6, "callgraph-all"),
@@ -204,14 +94,7 @@ class TestCheckPrivilege(
                 (3, 12, "callgraph-all"),
                 (1, 13, "callgraph-all"),
             ],
-        )
-
-        # Capability Conditions
-        cur.executemany(
-            """
-            INSERT INTO conditions VALUES (?, ?, ?, ?, ?, ?)
-        """,
-            [
+            conditions=[
                 (
                     "capable",
                     "kernel/admin.c:15:7:15:13",
@@ -253,26 +136,16 @@ class TestCheckPrivilege(
                     "fs/semi.c:35:2:35:10",
                 ),
             ],
-        )
-
-        # Macro invocations in DB for dynamic capability mapping
-        cur.executemany(
-            """
-            INSERT INTO macroinvocation_locations VALUES (?, ?, ?, ?)
-        """,
-            [
+            macroinvocation_locations=[
                 ("CAP_SYS_ADMIN", "kernel/admin.c", 15, 15),
                 ("CAP_NET_ADMIN", "net/net.c", 15, 15),
                 ("CAP_SYS_ADMIN", "fs/semi.c", 30, 30),
             ],
         )
 
-        self.conn.commit()
 
-    def tearDown(self):
-        """Close SQLite connection and clean up temporary directory."""
-        self.conn.close()
-        self.tmp_dir.cleanup()
+class TestCheckPrivilegeCore(CheckPrivilegeTestBase):
+    """Test suite for core privilege reachability and gate classification."""
 
     def test_load_capability_map(self):
         """Verify dynamic capability number-to-macro mapping from DB."""
@@ -313,8 +186,8 @@ class TestCheckPrivilege(
 
     def test_load_condition_gates(self):
         """Verify loading of call-site and function-level condition gates."""
-        call_gates, _func_gates, cap_map = (
-            check_privilege.load_condition_gates(self.conn)
+        call_gates, _func_gates, cap_map = check_privilege.load_condition_gates(
+            self.conn
         )
         self.assertIn(("kernel/admin.c", 20), call_gates)
         self.assertIn(("net/net.c", 20), call_gates)
@@ -379,9 +252,7 @@ class TestCheckPrivilege(
         summary = check_privilege.format_summary(
             target_info, verdict, primary, all_res
         )
-        self.assertIn(
-            "VERDICT: REACHABLE WITH NO PRIVILEGE (UNGATED)", summary
-        )
+        self.assertIn("VERDICT: REACHABLE WITH NO PRIVILEGE (UNGATED)", summary)
         self.assertIn(
             "Privilege Level: Unprivileged (No capabilities required)", summary
         )
@@ -562,31 +433,14 @@ class TestCheckPrivilege(
         self.assertIn("internal_gates", parsed["target"])
         self.assertEqual(len(parsed["target"]["internal_gates"]), 1)
 
+
+class TestCheckPrivilegePreconditions(CheckPrivilegeTestBase):
+    """Test suite for Kconfig, runtime tunables, entry preconditions, CLI."""
+
     def test_kconfig_and_runtime_tunables(self):
         """Verify Kconfig, sysctl, and module_param preconditions surface."""
         cur = self.conn.cursor()
-        cur.execute("""
-            CREATE TABLE configs (
-                config TEXT,
-                path TEXT,
-                ifdef INTEGER,
-                endif INTEGER,
-                else_ INTEGER
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE kconfig_symbols (
-                config TEXT NOT NULL,
-                type TEXT,
-                prompt TEXT,
-                depends_on TEXT,
-                select_list TEXT,
-                default_val TEXT,
-                build_val TEXT,
-                kconfig_file TEXT NOT NULL,
-                line_no INTEGER NOT NULL
-            )
-        """)
+        create_kconfig_schema(cur)
         cur.execute(
             "INSERT INTO configs VALUES (?, ?, ?, ?, ?)",
             ("CONFIG_UNPRIV_FS", "fs/unpriv.c", 1, 100, 0),
@@ -655,17 +509,7 @@ class TestCheckPrivilege(
     def test_async_edges_privilege_resolution(self):
         """Verify async_edges bridges callbacks and respects gates."""
         cur = self.conn.cursor()
-        cur.execute("""
-            CREATE TABLE async_edges (
-                caller TEXT NOT NULL,
-                callee TEXT NOT NULL,
-                mechanism TEXT NOT NULL,
-                form TEXT NOT NULL,
-                file TEXT NOT NULL,
-                line INTEGER NOT NULL,
-                context TEXT NOT NULL
-            )
-        """)
+        create_async_edges_schema(cur)
         cur.execute(
             "INSERT INTO function_locations VALUES (?, ?, ?, ?)",
             ("admin_rcu_cb", "fs/admin.c", 200, 220),
@@ -699,15 +543,7 @@ class TestCheckPrivilege(
     def test_entry_node_2d_privilege_model(self):
         """Verify 2D entry precondition model across non-syscall entry kinds."""
         cur = self.conn.cursor()
-        cur.execute("""
-            CREATE TABLE entry_node (
-                entry_kind TEXT NOT NULL,
-                entry TEXT NOT NULL,
-                function TEXT NOT NULL,
-                entry_location TEXT NOT NULL,
-                function_location TEXT NOT NULL
-            )
-        """)
+        create_entry_node_schema(cur)
         cur.executemany(
             "INSERT INTO function_locations VALUES (?, ?, ?, ?)",
             [
@@ -834,9 +670,7 @@ class TestCheckPrivilege(
         self.assertEqual(
             verdict_pkt, "REACHABLE, BUT ONLY BEHIND capable(CAP_NET_RAW)"
         )
-        self.assertEqual(
-            primary_pkt["attacker_position"], "local, CAP_NET_RAW"
-        )
+        self.assertEqual(primary_pkt["attacker_position"], "local, CAP_NET_RAW")
 
     def test_bounded_switch_case_guarded_span(self):
         """Verify a capability gate in an earlier switch case does not bleed."""
@@ -973,16 +807,138 @@ class TestCheckPrivilege(
         )
         self.assertIn("[scope: init_user_ns (global root)]", s_admin)
 
-        t_uns, v_uns, p_uns, all_uns = (
-            check_privilege.analyze_target_privilege(
-                self.db_path, "net/genl_foo.c", 155
-            )
+        t_uns, v_uns, p_uns, all_uns = check_privilege.analyze_target_privilege(
+            self.db_path, "net/genl_foo.c", 155
         )
         self.assertEqual(v_uns, "REACHABLE BEHIND USER NAMESPACE CAPABILITY")
         s_uns = check_privilege.format_summary(t_uns, v_uns, p_uns, all_uns)
         self.assertIn(
             "[scope: net->user_ns (CLONE_NEWUSER + CLONE_NEWNET)]", s_uns
         )
+        self.assertIn("necessary, not sufficient", s_uns)
+
+    def test_depth_limited_unreachable_verdict(self):
+        """Verify UNREACHABLE (DEPTH-LIMITED) when bridge depth is exceeded."""
+        cur = self.conn.cursor()
+        cur.executemany(
+            "INSERT INTO function_locations VALUES (?, ?, ?, ?)",
+            [
+                ("bridge_mid", "drivers/b.c", 10, 30),
+                ("deep_leaf", "drivers/b.c", 40, 60),
+            ],
+        )
+        cur.executemany(
+            "INSERT INTO ops_targets (parent, field, target, target_file,"
+            " target_start, target_end, exprcall_file, exprcall_line) VALUES"
+            " (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    "b_ops",
+                    "step1",
+                    "bridge_mid",
+                    "drivers/b.c",
+                    10,
+                    30,
+                    "fs/unpriv.c",
+                    25,
+                ),
+                (
+                    "b_ops",
+                    "step2",
+                    "deep_leaf",
+                    "drivers/b.c",
+                    40,
+                    60,
+                    "drivers/b.c",
+                    20,
+                ),
+            ],
+        )
+        self.conn.commit()
+
+        # With max_bridge_depth=1, deep_leaf (2 hops from unpriv) truncates
+        t_lim, v_lim, p_lim, all_lim = check_privilege.analyze_target_privilege(
+            self.db_path, "drivers/b.c", 45, max_bridge_depth=1
+        )
+        self.assertTrue(t_lim["depth_truncated"])
+        self.assertEqual(v_lim, "UNREACHABLE (DEPTH-LIMITED)")
+        s_lim = check_privilege.format_summary(t_lim, v_lim, p_lim, all_lim)
+        self.assertIn("UNREACHABLE (DEPTH-LIMITED)", s_lim)
+        self.assertIn("--max-bridge-depth", s_lim)
+
+        # With max_bridge_depth=6, deep_leaf reaches __do_sys_unpriv
+        t_ok, v_ok, _p_ok, _all_ok = check_privilege.analyze_target_privilege(
+            self.db_path, "drivers/b.c", 45, max_bridge_depth=6
+        )
+        self.assertFalse(t_ok["depth_truncated"])
+        self.assertEqual(v_ok, "REACHABLE WITH NO PRIVILEGE (UNGATED)")
+
+    def test_ops_open_acquisition_gate_propagation(self):
+        """Verify sibling callback inherits .proc_open capability gate."""
+        cur = self.conn.cursor()
+        cur.executemany(
+            "INSERT INTO function_locations VALUES (?, ?, ?, ?)",
+            [
+                ("mtrr_open", "arch/x86/kernel/cpu/mtrr/if.c", 389, 397),
+                ("mtrr_write", "arch/x86/kernel/cpu/mtrr/if.c", 80, 120),
+            ],
+        )
+        cur.execute(
+            "INSERT INTO conditions VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "capable",
+                "arch/x86/kernel/cpu/mtrr/if.c:394:7:394:13",
+                "arch/x86/kernel/cpu/mtrr/if.c:394:2:395:16",
+                "CAP_SYS_ADMIN",
+                "__guarded_span__:init_user_ns",
+                "arch/x86/kernel/cpu/mtrr/if.c:394:1:397:1",
+            ),
+        )
+        cur.executemany(
+            "INSERT INTO ops_targets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    "arch/x86/kernel/cpu/mtrr/if.c:399:46:409:1",
+                    "proc_ops",
+                    "proc_open",
+                    "mtrr_open",
+                    "arch/x86/kernel/cpu/mtrr/if.c",
+                    389,
+                    397,
+                    "fs/unpriv.c",
+                    24,
+                    10,
+                    30,
+                ),
+                (
+                    "arch/x86/kernel/cpu/mtrr/if.c:399:46:409:1",
+                    "proc_ops",
+                    "proc_write",
+                    "mtrr_write",
+                    "arch/x86/kernel/cpu/mtrr/if.c",
+                    80,
+                    120,
+                    "fs/unpriv.c",
+                    25,
+                    10,
+                    30,
+                ),
+            ],
+        )
+        self.conn.commit()
+
+        t_info, verdict, primary, all_res = (
+            check_privilege.analyze_target_privilege(
+                self.db_path, "arch/x86/kernel/cpu/mtrr/if.c", 90
+            )
+        )
+        self.assertEqual(verdict, "REACHABLE, BUT ONLY BEHIND CAP_SYS_ADMIN")
+        self.assertEqual(len(primary["gates"]), 1)
+        self.assertEqual(primary["gates"][0]["gate_scope"], "open_acquisition")
+        summary = check_privilege.format_summary(
+            t_info, verdict, primary, all_res
+        )
+        self.assertIn("[via mtrr_open (proc_ops.proc_open)]", summary)
 
 
 if __name__ == "__main__":
